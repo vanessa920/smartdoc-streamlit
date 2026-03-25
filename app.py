@@ -16,6 +16,7 @@ All pipeline code is inlined here:
 # ── Standard imports ──────────────────────────────────────────────────────────
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -80,9 +81,9 @@ st.markdown("""
   .d-lo  { background:#f44336; }
   .d-mis { background:#444; }
 
-  .stTextInput > label { color:#c9a84c !important; font-size:0.75rem !important;
+  .stTextInput > label { color:#5b9bd5 !important; font-size:0.75rem !important;
     font-weight:600 !important; letter-spacing:0.7px !important; text-transform:uppercase !important; }
-  .stFileUploader > label { color:#c9a84c !important; }
+  .stFileUploader > label { color:#5b9bd5 !important; }
   .stButton > button[kind="primary"] {
     background:#c9a84c !important; color:#1a1f26 !important;
     font-weight:700 !important; border:none !important; }
@@ -90,8 +91,24 @@ st.markdown("""
   .stDownloadButton > button {
     background:#1b3a1e !important; color:#81c784 !important;
     border:1px solid #388e3c !important; font-weight:700 !important; }
+
+  .step-instr { font-size:0.82rem; color:#8a9ab0; margin:0.1rem 0 0.8rem 0; line-height:1.5; }
+  .detected-val { font-size:0.72rem; color:#6b7a8d; font-style:italic; margin-top:-10px; margin-bottom:4px; padding-left:4px; }
+  .pdf-panel { border:1px solid #2a3040; border-radius:6px; overflow:hidden; }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _render_pdf_viewer(pdf_bytes: bytes, height: int = 700) -> None:
+    """Embed a PDF inline via base64 data-URI iframe."""
+    b64 = base64.b64encode(pdf_bytes).decode()
+    st.markdown(
+        f'<div class="pdf-panel">'
+        f'<iframe src="data:application/pdf;base64,{b64}" '
+        f'width="100%" height="{height}px" style="border:none;display:block;"></iframe>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -822,6 +839,7 @@ CONF_META = {
 for _k, _v in {
     "result": None, "edits": {}, "confirmed": False,
     "pdf_bytes": None, "invoice_name": "",
+    "uploaded_pdf_bytes": None,
     "sess_processed": 0, "sess_notouch": 0,
 }.items():
     if _k not in st.session_state:
@@ -894,6 +912,14 @@ st.markdown('<hr class="sd-divider">', unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.markdown('<div class="step-lbl">Step 1 — Load Invoice</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="step-instr">'
+    'Enter your AI model API key, then upload your invoice PDF. '
+    'Your key is used only for this session and is never stored. '
+    'Once uploaded, click <strong>Extract Fields</strong> to let SmartDoc read your document.'
+    '</div>',
+    unsafe_allow_html=True,
+)
 
 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 if not api_key:
@@ -910,6 +936,8 @@ pdf_name_to_use  = ""
 if uploaded:
     pdf_bytes_to_use = uploaded.getvalue()
     pdf_name_to_use  = uploaded.name
+    # Persist across reruns so the viewer stays visible in Step 2
+    st.session_state.uploaded_pdf_bytes = pdf_bytes_to_use
 
 if pdf_bytes_to_use and api_key:
     if st.button("🔍  Extract Fields", type="primary"):
@@ -949,6 +977,16 @@ if st.session_state.result:
     st.markdown('<hr class="sd-divider">', unsafe_allow_html=True)
     st.markdown('<div class="step-lbl">Step 2 — Review &amp; Correct</div>',
                 unsafe_allow_html=True)
+    st.markdown(
+        '<div class="step-instr">'
+        'Your invoice is shown on the left. SmartDoc\'s detected values appear below each field label. '
+        'A coloured dot shows extraction confidence — '
+        '<strong>green</strong> = high, <strong>yellow</strong> = medium (verify), '
+        '<strong>red</strong> = low, <strong>grey</strong> = not found. '
+        'Edit any field that looks wrong, then proceed to Step 3.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     if result.no_touch:
         badge = '<span class="badge b-nt">✓  NO-TOUCH — All fields validated</span>'
@@ -964,14 +1002,43 @@ if st.session_state.result:
         st.info(f"🧠 Business Memory auto-corrected {len(result.rules_applied)} "
                 f"field(s) before display: {names}", icon="🧠")
 
-    col_fields, col_info = st.columns([3, 2])
+    # Validation issues (full-width, above columns)
+    if result.validation and result.validation.issues:
+        for iss in result.validation.issues:
+            icon = "🔴" if iss.level == "error" else "⚠️"
+            st.markdown(f"{icon} **{FIELD_LABELS.get(iss.field,iss.field)}**: {iss.message}")
+    else:
+        st.success("All validation checks passed.", icon="✅")
 
+    st.markdown("")
+    col_pdf, col_fields = st.columns([1, 1])
+
+    # ── Left: original invoice viewer ────────────────────────────────────────
+    with col_pdf:
+        st.markdown("**📄 Original Invoice**")
+        if st.session_state.get("uploaded_pdf_bytes"):
+            _render_pdf_viewer(st.session_state.uploaded_pdf_bytes, height=720)
+        else:
+            st.info("Invoice preview unavailable — re-upload to view here.", icon="📋")
+
+    # ── Right: detected fields + editable form ───────────────────────────────
     with col_fields:
+        st.markdown(
+            '<div style="font-size:0.78rem;line-height:2.0;margin-bottom:0.6rem;">'
+            '<span class="dot d-hi"></span>HIGH &nbsp;'
+            '<span class="dot d-med"></span>MED (verify) &nbsp;'
+            '<span class="dot d-lo"></span>LOW (review) &nbsp;'
+            '<span class="dot d-mis"></span>not found &nbsp;&nbsp; ★ required'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown("**Edit any field that looks wrong:**")
+
         new_edits = {}
         for fld in TARGET_FIELDS:
-            conf    = result.confidence.get(fld, "missing")
-            dot_cls = CONF_META.get(conf, "d-mis")
+            conf      = result.confidence.get(fld, "missing")
+            dot_cls   = CONF_META.get(conf, "d-mis")
+            detected  = result.fields.get(fld, "") or ""
             c_dot, c_inp = st.columns([0.5, 9.5])
             with c_dot:
                 st.markdown(f'<div style="margin-top:30px;text-align:center;">'
@@ -985,27 +1052,13 @@ if st.session_state.result:
                     placeholder="(not found)" if not cur else "",
                     disabled=st.session_state.confirmed,
                 )
+                # Show the raw detected value as a hint beneath the input
+                hint = detected if detected else "—  not detected"
+                st.markdown(
+                    f'<div class="detected-val">Detected: {hint}</div>',
+                    unsafe_allow_html=True,
+                )
         st.session_state.edits = new_edits
-
-    with col_info:
-        st.markdown("**Confidence**")
-        st.markdown("""
-        <div style="font-size:0.8rem;line-height:2.2;">
-          <span class="dot d-hi"></span>HIGH — extracted with confidence<br>
-          <span class="dot d-med"></span>MED — verify recommended<br>
-          <span class="dot d-lo"></span>LOW — please review carefully<br>
-          <span class="dot d-mis"></span>— &nbsp;not found in document
-        </div>""", unsafe_allow_html=True)
-        st.caption("★ Required field")
-        st.markdown("")
-
-        if result.validation and result.validation.issues:
-            st.markdown("**Validation Issues**")
-            for iss in result.validation.issues:
-                icon = "🔴" if iss.level == "error" else "⚠️"
-                st.markdown(f"{icon} **{FIELD_LABELS.get(iss.field,iss.field)}**: {iss.message}")
-        else:
-            st.success("All checks passed.", icon="✅")
 
         if result.rules_applied:
             st.markdown("")
@@ -1022,6 +1075,15 @@ if st.session_state.result:
     st.markdown('<hr class="sd-divider">', unsafe_allow_html=True)
     st.markdown('<div class="step-lbl">Step 3 — Confirm, Teach &amp; Export</div>',
                 unsafe_allow_html=True)
+    st.markdown(
+        '<div class="step-instr">'
+        'If you edited any fields above, click <strong>Save Corrections</strong> to teach SmartDoc — '
+        'it will remember your preferences for future invoices. '
+        'If everything looks correct, click <strong>Looks Good</strong> to confirm. '
+        'Then download your extraction report as a PDF.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     if not st.session_state.confirmed:
         col_save, col_ok = st.columns(2)
@@ -1087,7 +1149,8 @@ if st.session_state.result:
         with col_new:
             if st.button("📄  Process Another Invoice", use_container_width=True):
                 for k, v in {"result": None, "edits": {}, "confirmed": False,
-                             "pdf_bytes": None, "invoice_name": ""}.items():
+                             "pdf_bytes": None, "invoice_name": "",
+                             "uploaded_pdf_bytes": None}.items():
                     st.session_state[k] = v
                 st.rerun()
 
