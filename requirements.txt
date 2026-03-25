@@ -2,3 +2,4 @@ anthropic>=0.25.0
 streamlit>=1.32.0
 pdfplumber>=0.10.0
 reportlab>=4.1.0
+pypdfium2>=4.0.0

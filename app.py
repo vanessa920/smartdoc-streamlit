@@ -100,15 +100,22 @@ st.markdown("""
 
 
 def _render_pdf_viewer(pdf_bytes: bytes, height: int = 700) -> None:
-    """Embed a PDF inline via base64 data-URI iframe."""
-    b64 = base64.b64encode(pdf_bytes).decode()
-    st.markdown(
-        f'<div class="pdf-panel">'
-        f'<iframe src="data:application/pdf;base64,{b64}" '
-        f'width="100%" height="{height}px" style="border:none;display:block;"></iframe>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    """Render each PDF page as an image (bypasses browser iframe/CSP blocks)."""
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(pdf_bytes)
+        n = len(doc)
+        for i, page in enumerate(doc):
+            bitmap = page.render(scale=1.5)   # 1.5× → ~113 dpi, crisp on retina
+            pil_img = bitmap.to_pil()
+            st.image(pil_img, caption=f"Page {i + 1} / {n}",
+                     use_container_width=True)
+        doc.close()
+    except Exception as e:
+        st.warning(f"Could not render preview: {e}", icon="⚠️")
+        st.download_button("📥 Download Invoice PDF to view",
+                           pdf_bytes, "invoice.pdf", "application/pdf",
+                           use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -840,6 +847,7 @@ for _k, _v in {
     "result": None, "edits": {}, "confirmed": False,
     "pdf_bytes": None, "invoice_name": "",
     "uploaded_pdf_bytes": None,
+    "show_rules": False,
     "sess_processed": 0, "sess_notouch": 0,
 }.items():
     if _k not in st.session_state:
@@ -873,21 +881,14 @@ with st.sidebar:
     st.metric("Session Invoices", n_proc)
     st.metric("No-Touch Rate",    nt_pct)
 
-    if dist.rules:
-        st.markdown("---")
-        st.markdown("**Active Rules**")
-        for rule in dist.rules:
-            fld = getattr(rule, "field", "?")
-            if rule.rule_type == "substitution":
-                st.markdown(f'<span class="rule-pill">{fld}</span> `"{rule.wrong}"` → `"{rule.correct}"`',
-                            unsafe_allow_html=True)
-            elif rule.rule_type == "format":
-                st.markdown(f'<span class="rule-pill">{fld}</span> format rule ({rule.confidence:.0%})',
-                            unsafe_allow_html=True)
-            elif rule.rule_type == "anomaly_threshold":
-                st.markdown(f'<span class="rule-pill">TOTAL</span> anomaly: {rule.lower:.0f}–{rule.upper:.0f}',
-                            unsafe_allow_html=True)
-    else:
+    st.markdown("---")
+    n_rules = len(dist.rules)
+    btn_label = (f"📋 Hide Rules" if st.session_state.show_rules
+                 else f"📋 View / Edit Rules ({n_rules})")
+    if st.button(btn_label, use_container_width=True):
+        st.session_state.show_rules = not st.session_state.show_rules
+        st.rerun()
+    if not dist.rules:
         st.info("Process & correct invoices to build memory.", icon="💡")
 
     st.markdown("---")
@@ -905,6 +906,126 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.markdown('<hr class="sd-divider">', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RULES EDITOR  (toggled via sidebar button)
+# ══════════════════════════════════════════════════════════════════════════════
+
+if st.session_state.show_rules:
+    _log, _dist = _get_memory()
+    st.markdown('<div class="step-lbl">Business Memory — Rules Editor</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="step-instr">'
+        'These rules were learned from your past corrections. '
+        'Edit any value directly in the table, add new rows with the <strong>+</strong> button, '
+        'or delete rows using the trash icon. Click <strong>💾 Save Rules</strong> when done.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Substitution rules (most common) ──────────────────────────────────────
+    sub_rules = [
+        {"Field": r.field, "Detected (wrong)": r.wrong,
+         "Correct value": r.correct,
+         "Times seen": r.frequency, "Confidence": f"{r.confidence:.0%}"}
+        for r in _dist.rules if r.rule_type == "substitution"
+    ]
+    st.markdown("**Substitution Rules** — fix recurring mis-extractions")
+    edited_sub = st.data_editor(
+        sub_rules,
+        column_config={
+            "Field": st.column_config.SelectboxColumn(
+                "Field", options=list(TARGET_FIELDS), required=True),
+            "Detected (wrong)": st.column_config.TextColumn(
+                "Detected (wrong)", help="Value Claude extracted incorrectly"),
+            "Correct value": st.column_config.TextColumn(
+                "Correct value", help="The value it should be"),
+            "Times seen": st.column_config.NumberColumn(
+                "Times seen", disabled=True, help="How often this was corrected"),
+            "Confidence": st.column_config.TextColumn(
+                "Confidence", disabled=True),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        key="sub_rules_editor",
+    )
+
+    # ── Format rules ───────────────────────────────────────────────────────────
+    fmt_rules = [r for r in _dist.rules if r.rule_type == "format"]
+    if fmt_rules:
+        st.markdown("**Format Rules** — regex transformations applied automatically")
+        fmt_data = [
+            {"Field": r.field, "Regex pattern": r.pattern,
+             "Replacement": r.replacement, "Confidence": f"{r.confidence:.0%}"}
+            for r in fmt_rules
+        ]
+        edited_fmt = st.data_editor(
+            fmt_data,
+            column_config={
+                "Field": st.column_config.SelectboxColumn(
+                    "Field", options=list(TARGET_FIELDS), required=True),
+                "Regex pattern": st.column_config.TextColumn("Regex pattern"),
+                "Replacement":   st.column_config.TextColumn("Replacement"),
+                "Confidence":    st.column_config.TextColumn("Confidence", disabled=True),
+            },
+            num_rows="dynamic",
+            use_container_width=True,
+            key="fmt_rules_editor",
+        )
+    else:
+        edited_fmt = []
+        fmt_rules  = []
+
+    # ── Anomaly threshold ──────────────────────────────────────────────────────
+    anom = next((r for r in _dist.rules if r.rule_type == "anomaly_threshold"), None)
+    new_anom = anom
+    if anom:
+        st.markdown("**Anomaly Threshold** — flags invoice totals outside the expected range")
+        ac1, ac2, ac3, ac4 = st.columns(4)
+        new_mean = ac1.number_input("Mean total",  value=float(anom.mean),  step=1.0, key="anom_mean")
+        new_std  = ac2.number_input("Std dev",     value=float(anom.std),   step=1.0, key="anom_std")
+        new_k    = ac3.number_input("K (σ)",       value=float(anom.k),     step=0.5, key="anom_k")
+        ac4.markdown(
+            f"<div style='padding-top:28px;font-size:0.8rem;color:#8a9ab0;'>"
+            f"Range: {max(0, new_mean - new_k*new_std):,.0f} – {new_mean + new_k*new_std:,.0f}"
+            f"</div>", unsafe_allow_html=True)
+        new_anom = AnomalyThresholdRule(
+            field="TOTAL", mean=new_mean, std=new_std, k=new_k, n_samples=anom.n_samples)
+
+    # ── Save button ────────────────────────────────────────────────────────────
+    if st.button("💾  Save Rules", type="primary"):
+        new_rules = []
+        for row in edited_sub:
+            if row.get("Field") and row.get("Detected (wrong)") is not None:
+                new_rules.append(SubstitutionRule(
+                    field=row["Field"],
+                    wrong=row.get("Detected (wrong)", ""),
+                    correct=row.get("Correct value", ""),
+                    frequency=int(row.get("Times seen") or 0),
+                    confidence=float(
+                        str(row.get("Confidence", "0")).replace("%", "").strip() or 0
+                    ) / (100 if "%" in str(row.get("Confidence", "")) else 1),
+                ))
+        for i, row in enumerate(edited_fmt):
+            orig = fmt_rules[i] if i < len(fmt_rules) else None
+            if row.get("Field") and row.get("Regex pattern"):
+                new_rules.append(FormatRule(
+                    field=row["Field"],
+                    pattern=row.get("Regex pattern", ""),
+                    replacement=row.get("Replacement", ""),
+                    confidence=getattr(orig, "confidence", 0.0),
+                    examples=getattr(orig, "examples", []),
+                ))
+        if new_anom:
+            new_rules.append(new_anom)
+        _dist.rules = new_rules
+        _dist._save()
+        st.success(f"✓ {len(new_rules)} rule(s) saved to Business Memory.", icon="🧠")
+        st.rerun()
+
+    st.markdown('<hr class="sd-divider">', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
