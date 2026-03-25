@@ -898,30 +898,18 @@ st.markdown('<div class="step-lbl">Step 1 — Load Invoice</div>', unsafe_allow_
 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 if not api_key:
     with st.expander("⚙️ API Key", expanded=True):
-        api_key = st.text_input("Anthropic API Key", type="password",
+        api_key = st.text_input("Paste your model API key here — we will never save it.",
+                                type="password",
                                 placeholder="sk-ant-api03-...",
                                 help="Stays in memory only — never stored to disk.")
 
-col_up, col_or, col_sample = st.columns([4, 0.4, 2])
-with col_up:
-    uploaded = st.file_uploader("Upload your own invoice PDF", type=["pdf"])
-with col_or:
-    st.markdown("<div style='text-align:center;color:#555;padding-top:38px;'>or</div>",
-                unsafe_allow_html=True)
-with col_sample:
-    st.markdown("<div style='padding-top:26px;'></div>", unsafe_allow_html=True)
-    use_sample = st.button("📄  Use Sample Invoice", use_container_width=True,
-                           disabled=not SAMPLE_PDF.exists(),
-                           help="Loads SAMPLE_invoice.pdf from the same folder as app.py")
+uploaded = st.file_uploader("Upload your invoice PDF", type=["pdf"])
 
 pdf_bytes_to_use = None
 pdf_name_to_use  = ""
 if uploaded:
     pdf_bytes_to_use = uploaded.getvalue()
     pdf_name_to_use  = uploaded.name
-elif use_sample and SAMPLE_PDF.exists():
-    pdf_bytes_to_use = SAMPLE_PDF.read_bytes()
-    pdf_name_to_use  = SAMPLE_PDF.name
 
 if pdf_bytes_to_use and api_key:
     if st.button("🔍  Extract Fields", type="primary"):
@@ -949,7 +937,7 @@ if pdf_bytes_to_use and api_key:
                 Path(tmp_path).unlink(missing_ok=True)
         st.rerun()
 elif pdf_bytes_to_use and not api_key:
-    st.warning("Enter your Anthropic API key above to continue.", icon="🔑")
+    st.warning("Paste your API key above to continue.", icon="🔑")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
